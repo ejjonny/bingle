@@ -8,15 +8,22 @@ use bevy::{
 use bevy_rapier2d::prelude::*;
 use bevy_turborand::prelude::*;
 
-const BUCKET_WIDTH: f32 = 300.;
-const BUCKET_HEIGHT: f32 = 180.;
-const BUCKET_Y_OFFSET: f32 = -100.;
+const UNIVERSAL_SCALE: f32 = 1.;
+const BUCKET_WIDTH: f32 = 300. * UNIVERSAL_SCALE;
+const BUCKET_HEIGHT: f32 = 180. * UNIVERSAL_SCALE;
+const BUCKET_Y_OFFSET: f32 = -100. * UNIVERSAL_SCALE;
 const UPCOMING_BALL_POSITION: Vec3 = Vec3::new(-BUCKET_WIDTH * 0.5 - BARRIER_PADDING * 0.5, 0., 0.);
-const BARRIER_PADDING: f32 = 100.;
+const BARRIER_PADDING: f32 = 100. * UNIVERSAL_SCALE;
 const STRIKE_LIMIT: i32 = 4;
 const COLOR_CYCLE_COUNT: i32 = 6;
 const GROW_DURATION_SECONDS: f32 = 2.;
 const DROPPABLE_RANGE: i32 = 4;
+const BALL_BASE_SIZE: f32 = 7. * UNIVERSAL_SCALE;
+const BALL_LEVEL_SIZE: f32 = 7. * UNIVERSAL_SCALE;
+const WALL_THICKNESS: f32 = 20. * UNIVERSAL_SCALE;
+const BALL_DROPPER_OFFSET: f32 = 190. * UNIVERSAL_SCALE;
+const DROP_SPAM_Y_BLOCK_OFFSET: f32 = 100. * UNIVERSAL_SCALE;
+const DROP_SPAM_X_BLOCK_DISTANCE: f32 = 35. * UNIVERSAL_SCALE;
 
 fn main() {
     App::new()
@@ -43,7 +50,6 @@ fn main() {
                 ..default()
             }),
         )
-        // .add_plugins(DefaultPlugins)
         .add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
         // .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(RngPlugin::default())
@@ -56,6 +62,7 @@ fn main() {
                 my_cursor_system,
                 mouse_click_system,
                 touch_events_system,
+                collision_system,
                 squash_balls,
                 grow_system,
                 check_game_state,
@@ -73,6 +80,9 @@ struct CursorWorldPosition(Vec2);
 
 #[derive(Resource, Default)]
 struct TouchWorldPosition(Vec2);
+
+#[derive(Resource, Default)]
+struct Contacts(HashSet<(Entity, Entity)>);
 
 #[derive(Resource)]
 struct Game {
@@ -202,23 +212,29 @@ fn setup_physics(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
+    commands.insert_resource(Contacts(HashSet::<(Entity, Entity)>::new()));
     let mut walls = Vec::<(f32, f32, f32, f32)>::new();
     // Floor
     walls.push((
-        BUCKET_WIDTH + 20.,
-        20.,
+        BUCKET_WIDTH + WALL_THICKNESS,
+        WALL_THICKNESS,
         0.,
         -(BUCKET_HEIGHT / 2.) + BUCKET_Y_OFFSET,
     ));
     // Left wall
     walls.push((
-        20.,
-        BUCKET_HEIGHT + 20.,
+        WALL_THICKNESS,
+        BUCKET_HEIGHT + WALL_THICKNESS,
         -(BUCKET_WIDTH / 2.),
         BUCKET_Y_OFFSET,
     ));
     // Right wall
-    walls.push((20., BUCKET_HEIGHT + 20., BUCKET_WIDTH / 2., BUCKET_Y_OFFSET));
+    walls.push((
+        WALL_THICKNESS,
+        BUCKET_HEIGHT + WALL_THICKNESS,
+        BUCKET_WIDTH / 2.,
+        BUCKET_Y_OFFSET,
+    ));
     spawn_walls(
         &mut commands,
         &mut walls,
@@ -231,28 +247,28 @@ fn setup_physics(
     let largest_dimension = BUCKET_WIDTH.max(BUCKET_HEIGHT);
     // Left wall
     walls.push((
-        20.,
-        largest_dimension + BARRIER_PADDING * 2. + 20.,
+        WALL_THICKNESS,
+        largest_dimension + BARRIER_PADDING * 2. + WALL_THICKNESS,
         largest_dimension / 2. + BARRIER_PADDING,
         0.,
     ));
     walls.push((
-        20.,
-        largest_dimension + BARRIER_PADDING * 2. + 20.,
+        WALL_THICKNESS,
+        largest_dimension + BARRIER_PADDING * 2. + WALL_THICKNESS,
         -(largest_dimension / 2. + BARRIER_PADDING),
         0.,
     ));
     // Cieling
     walls.push((
-        largest_dimension + BARRIER_PADDING * 2. + 20.,
-        20.,
+        largest_dimension + BARRIER_PADDING * 2. + WALL_THICKNESS,
+        WALL_THICKNESS,
         0.,
         largest_dimension / 2. + BARRIER_PADDING,
     ));
     // Floor
     walls.push((
-        largest_dimension + BARRIER_PADDING * 2. + 20.,
-        20.,
+        largest_dimension + BARRIER_PADDING * 2. + WALL_THICKNESS,
+        WALL_THICKNESS,
         0.,
         -(largest_dimension / 2. + BARRIER_PADDING),
     ));
@@ -328,16 +344,20 @@ fn click(
     if !game.over {
         let dropper = &mut game.dropper;
         let current_ball_type = dropper.next_ball.ball_type;
-        let position = click_position.x.clamp(-BUCKET_WIDTH * 0.5 - (BARRIER_PADDING * 0.5), BUCKET_WIDTH * 0.5 + (BARRIER_PADDING * 0.5));
+        let position = click_position.x.clamp(
+            -BUCKET_WIDTH * 0.5 - (BARRIER_PADDING * 0.5),
+            BUCKET_WIDTH * 0.5 + (BARRIER_PADDING * 0.5),
+        );
         let blocked = existing_balls.iter().any(|(_, _, transform)| {
-            transform.translation.y >= 100.0 && position - transform.translation.x < 35.
+            transform.translation.y >= DROP_SPAM_Y_BLOCK_OFFSET
+                && position - transform.translation.x < DROP_SPAM_X_BLOCK_DISTANCE
         });
         if !blocked {
             spawn_ball(
                 &mut commands,
                 current_ball_type,
                 None,
-                Transform::from_xyz(position, 190.0, 0.0),
+                Transform::from_xyz(position, BALL_DROPPER_OFFSET, 0.0),
                 &mut meshes,
                 &mut materials,
             );
@@ -391,6 +411,7 @@ fn spawn_ball(
 }
 
 fn grow_system(
+    mut commands: Commands,
     time: Res<Time>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut balls_growing: Query<(
@@ -402,10 +423,14 @@ fn grow_system(
         &Mesh2dHandle,
     )>,
 ) {
-    for (_, mut ball_type, target, mut progress, mut collider, mesh) in balls_growing.iter_mut() {
+    for (entity, mut ball_type, target, mut progress, mut collider, mesh) in
+        balls_growing.iter_mut()
+    {
         progress.0 += time.delta_seconds() / GROW_DURATION_SECONDS;
         if progress.0 >= 1. {
             *ball_type = BallType::Simple(target.0);
+            commands.entity(entity).remove::<BallProgress>();
+            commands.entity(entity).remove::<BallTarget>();
             let size = ball_type.size();
             *collider = Collider::ball(size);
             if let Some(mesh) = meshes.get_mut(&mesh.0) {
@@ -472,7 +497,7 @@ impl BallType {
 impl BallType {
     fn size(&self) -> f32 {
         match self {
-            Self::Simple(size) => return 7. + *size as f32 * 7.,
+            Self::Simple(size) => return BALL_BASE_SIZE + *size as f32 * BALL_LEVEL_SIZE,
             Self::Special => return 10.,
         }
     }
@@ -533,26 +558,39 @@ fn my_cursor_system(
     }
 }
 
-fn squash_balls(
-    mut game: ResMut<Game>,
-    mut commands: Commands,
+fn collision_system(
     mut collision_events: EventReader<CollisionEvent>,
-    balls: Query<(Entity, &BallType, Option<&BallTarget>, &Transform)>,
-    barriers: Query<(Entity, &OutOfBoundsBarrier)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut contacts: ResMut<Contacts>,
 ) {
-    let mut contacts = HashSet::new();
-    let mut ball_types = HashMap::<Entity, (BallType, Transform)>::new();
     for collision_event in collision_events.read() {
         match collision_event {
             CollisionEvent::Started(entity_a, entity_b, _) => {
-                contacts.insert((entity_a, entity_b));
+                contacts.0.insert((*entity_a, *entity_b));
             }
-            _ => (),
+            CollisionEvent::Stopped(entity_a, entity_b, _) => {
+                contacts.0.remove(&(*entity_a, *entity_b));
+            }
         }
     }
-    for (entity, ball_type, ball_target, transform) in balls.iter() {
+}
+
+fn squash_balls(
+    mut game: ResMut<Game>,
+    mut commands: Commands,
+    contacts: ResMut<Contacts>,
+    balls: Query<(
+        Entity,
+        &BallType,
+        Option<&BallTarget>,
+        Option<&BallProgress>,
+        &Transform,
+        &Handle<ColorMaterial>,
+    )>,
+    barriers: Query<(Entity, &OutOfBoundsBarrier)>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    let mut ball_types = HashMap::<Entity, (BallType, Transform)>::new();
+    for (entity, ball_type, ball_target, _, transform, _) in balls.iter() {
         let match_type;
         if let Some(target) = ball_target {
             match_type = BallType::Simple(target.0);
@@ -566,39 +604,49 @@ fn squash_balls(
         barrier_entities.insert(entity, true);
     }
     let mut visited = HashSet::<Entity>::new();
-    for contact in contacts {
-        match (ball_types.get(contact.0), ball_types.get(contact.1)) {
+    for contact in contacts.0.iter() {
+        match (ball_types.get(&contact.0), ball_types.get(&contact.1)) {
             (
                 Some((BallType::Simple(level_a), transform_a)),
                 Some((BallType::Simple(level_b), transform_b)),
             ) => {
                 // if level_a % COLOR_CYCLE_COUNT == level_b % COLOR_CYCLE_COUNT {
-                if level_a == level_b && visited.insert(*contact.0) && visited.insert(*contact.1) {
-                    // let middle = transform_a.translation.lerp(transform_b.translation, 0.5);
-                    commands.entity(*contact.0).despawn();
-                    commands.entity(*contact.1).despawn();
-                    let larger = i32::max(*level_a, *level_b);
-                    let a_larger = larger == *level_a;
-                    spawn_ball(
-                        &mut commands,
-                        BallType::Simple(larger),
-                        Some(BallTarget(larger + 1)),
-                        if a_larger { *transform_a } else { *transform_b },
-                        &mut meshes,
-                        &mut materials,
-                    );
-                    game.score += (level_a + level_b) * 11;
+                if level_a == level_b {
+                    let lower = f32::min(transform_a.translation.y, transform_b.translation.y);
+                    let a_lower = lower == transform_a.translation.y;
+                    let replaced = if a_lower { contact.0 } else { contact.1 };
+                    let removed = if a_lower { contact.1 } else { contact.0 };
+                    if visited.insert(replaced) {
+                        commands.entity(removed).despawn();
+                        if let Some(replaced_ball) = balls.iter().find(|ball| ball.0 == replaced) {
+                            // Update existing entity's color & add components for growth
+                            let upgraded_ball_type = BallType::Simple(level_a + 1);
+                            materials.insert(
+                                replaced_ball.5,
+                                ColorMaterial::from(upgraded_ball_type.color()),
+                            );
+                            commands.entity(replaced).insert(BallTarget(level_a + 1));
+                            if let Some(current_progress) = replaced_ball.3 {
+                                commands
+                                    .entity(replaced)
+                                    .insert(BallProgress(current_progress.0 * 0.5));
+                            } else {
+                                commands.entity(replaced).insert(BallProgress(0.));
+                            }
+                        }
+                        game.score += (level_a + level_b) * 11;
+                    }
                 }
             }
             _ => {
                 let mut hit_barrier = false;
-                if barrier_entities.get(contact.0) == Some(&true) {
-                    commands.get_entity(*contact.1).unwrap();
-                    commands.entity(*contact.1).despawn();
+                if barrier_entities.get(&contact.0) == Some(&true) {
+                    commands.get_entity(contact.1).unwrap();
+                    commands.entity(contact.1).despawn();
                     hit_barrier = true;
-                } else if barrier_entities.get(contact.1) == Some(&true) {
-                    commands.get_entity(*contact.0).unwrap();
-                    commands.entity(*contact.0).despawn();
+                } else if barrier_entities.get(&contact.1) == Some(&true) {
+                    commands.get_entity(contact.0).unwrap();
+                    commands.entity(contact.0).despawn();
                     hit_barrier = true;
                 }
                 if hit_barrier {
@@ -630,7 +678,7 @@ fn restart_game_system(
     overlay: Query<Entity, With<GameOverOverlay>>,
     balls: Query<Entity, With<BallType>>,
     asset_server: Res<AssetServer>,
-    game_ev: EventReader<RestartGameEvent>,
+    mut game_ev: EventReader<RestartGameEvent>,
 ) {
     if !game_ev.is_empty() {
         game.score = 0;
@@ -704,6 +752,7 @@ fn restart_game_system(
                 ));
             });
     }
+    game_ev.clear();
 }
 
 fn game_over_system(
@@ -711,7 +760,7 @@ fn game_over_system(
     mut commands: Commands,
     overlay: Query<Entity, With<GameOverlay>>,
     asset_server: Res<AssetServer>,
-    game_ev: EventReader<GameOverEvent>,
+    mut game_ev: EventReader<GameOverEvent>,
 ) {
     if !game_ev.is_empty() {
         for entity in overlay.iter() {
@@ -792,4 +841,5 @@ fn game_over_system(
                 ));
             });
     }
+    game_ev.clear();
 }
