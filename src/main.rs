@@ -328,7 +328,7 @@ fn click(
     if !game.over {
         let dropper = &mut game.dropper;
         let current_ball_type = dropper.next_ball.ball_type;
-        let position = click_position.x.clamp(-BUCKET_WIDTH, BUCKET_WIDTH);
+        let position = click_position.x.clamp(-BUCKET_WIDTH * 0.5 - (BARRIER_PADDING * 0.5), BUCKET_WIDTH * 0.5 + (BARRIER_PADDING * 0.5));
         let blocked = existing_balls.iter().any(|(_, _, transform)| {
             transform.translation.y >= 100.0 && position - transform.translation.x < 35.
         });
