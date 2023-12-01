@@ -1,4 +1,5 @@
 use bevy::{
+    input::touch::TouchPhase,
     prelude::*,
     sprite::{MaterialMesh2dBundle, Mesh2dHandle},
     utils::{HashMap, HashSet},
@@ -10,8 +11,7 @@ use bevy_turborand::prelude::*;
 const BUCKET_WIDTH: f32 = 300.;
 const BUCKET_HEIGHT: f32 = 180.;
 const BUCKET_Y_OFFSET: f32 = -100.;
-const UPCOMING_BALL_POSITION: Vec3 =
-    Vec3::new(-BUCKET_WIDTH * 0.5 - BARRIER_PADDING * 0.5, 0., 0.);
+const UPCOMING_BALL_POSITION: Vec3 = Vec3::new(-BUCKET_WIDTH * 0.5 - BARRIER_PADDING * 0.5, 0., 0.);
 const BARRIER_PADDING: f32 = 100.;
 const STRIKE_LIMIT: i32 = 4;
 const COLOR_CYCLE_COUNT: i32 = 6;
@@ -29,7 +29,6 @@ fn main() {
                         BUCKET_WIDTH.max(BUCKET_HEIGHT) + BARRIER_PADDING * 2.,
                     )
                         .into(),
-                    present_mode: PresentMode::AutoVsync,
                     // Tells wasm to resize the window according to the available canvas
                     fit_canvas_to_parent: true,
                     // Tells wasm not to override default event handling, like F5, Ctrl+R etc.
@@ -56,6 +55,7 @@ fn main() {
             (
                 my_cursor_system,
                 mouse_click_system,
+                touch_events_system,
                 squash_balls,
                 grow_system,
                 check_game_state,
@@ -70,6 +70,9 @@ fn main() {
 
 #[derive(Resource, Default)]
 struct CursorWorldPosition(Vec2);
+
+#[derive(Resource, Default)]
+struct TouchWorldPosition(Vec2);
 
 #[derive(Resource)]
 struct Game {
@@ -201,9 +204,19 @@ fn setup_physics(
 ) {
     let mut walls = Vec::<(f32, f32, f32, f32)>::new();
     // Floor
-    walls.push((BUCKET_WIDTH + 20., 20., 0., -(BUCKET_HEIGHT / 2.) + BUCKET_Y_OFFSET));
+    walls.push((
+        BUCKET_WIDTH + 20.,
+        20.,
+        0.,
+        -(BUCKET_HEIGHT / 2.) + BUCKET_Y_OFFSET,
+    ));
     // Left wall
-    walls.push((20., BUCKET_HEIGHT + 20., -(BUCKET_WIDTH / 2.), BUCKET_Y_OFFSET));
+    walls.push((
+        20.,
+        BUCKET_HEIGHT + 20.,
+        -(BUCKET_WIDTH / 2.),
+        BUCKET_Y_OFFSET,
+    ));
     // Right wall
     walls.push((20., BUCKET_HEIGHT + 20., BUCKET_WIDTH / 2., BUCKET_Y_OFFSET));
     spawn_walls(
@@ -246,44 +259,98 @@ fn setup_physics(
     spawn_walls(&mut commands, &mut walls, true, &mut meshes, &mut materials);
 }
 
+fn touch_events_system(
+    mut touch_evr: EventReader<TouchInput>,
+    commands: Commands,
+    existing_balls: Query<(Entity, &BallType, &Transform)>,
+    meshes: ResMut<Assets<Mesh>>,
+    materials: ResMut<Assets<ColorMaterial>>,
+    game: ResMut<Game>,
+    game_ev: EventWriter<RestartGameEvent>,
+    q_camera: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
+) {
+    if let Some(event) = touch_evr.read().last() {
+        match event.phase {
+            TouchPhase::Ended => {
+                let (camera, camera_transform) = q_camera.single();
+                if let Some(world_position) = camera
+                    .viewport_to_world(camera_transform, event.position)
+                    .map(|ray| ray.origin.truncate())
+                {
+                    click(
+                        commands,
+                        existing_balls,
+                        world_position,
+                        meshes,
+                        materials,
+                        game,
+                        game_ev,
+                    );
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 fn mouse_click_system(
-    mut commands: Commands,
+    commands: Commands,
     mouse_button: Res<Input<MouseButton>>,
     mouse_pos: Res<CursorWorldPosition>,
     existing_balls: Query<(Entity, &BallType, &Transform)>,
+    meshes: ResMut<Assets<Mesh>>,
+    materials: ResMut<Assets<ColorMaterial>>,
+    game: ResMut<Game>,
+    game_ev: EventWriter<RestartGameEvent>,
+) {
+    if mouse_button.just_released(MouseButton::Left) {
+        click(
+            commands,
+            existing_balls,
+            mouse_pos.0,
+            meshes,
+            materials,
+            game,
+            game_ev,
+        );
+    }
+}
+
+fn click(
+    mut commands: Commands,
+    existing_balls: Query<(Entity, &BallType, &Transform)>,
+    click_position: Vec2,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut game: ResMut<Game>,
     mut game_ev: EventWriter<RestartGameEvent>,
 ) {
-    if mouse_button.just_released(MouseButton::Left) {
-        if !game.over {
-            let dropper = &mut game.dropper;
-            let current_ball_type = dropper.next_ball.ball_type;
-            let position = mouse_pos.0.x.clamp(-BUCKET_WIDTH, BUCKET_WIDTH);
-            let blocked = existing_balls
-                .iter()
-                .any(|(_, _, transform)| transform.translation.y >= 100.0 && position - transform.translation.x < 35.);
-            if !blocked {
-                spawn_ball(
-                    &mut commands,
-                    current_ball_type,
-                    None,
-                    Transform::from_xyz(position, 190.0, 0.0),
-                    &mut meshes,
-                    &mut materials,
-                );
-                let new_ball = BallType::from_i32(dropper.rng.i32(1..=DROPPABLE_RANGE));
-                game.dropper.next_ball.ball_type = new_ball;
-                // Swap upcoming mesh
-                commands.get_entity(game.dropper.mesh).unwrap().despawn();
-                game.dropper.mesh = commands
-                    .spawn(new_ball.mesh(true, None, &mut meshes, &mut materials))
-                    .id()
-            }
-        } else {
-            game_ev.send(RestartGameEvent {});
+    if !game.over {
+        let dropper = &mut game.dropper;
+        let current_ball_type = dropper.next_ball.ball_type;
+        let position = click_position.x.clamp(-BUCKET_WIDTH, BUCKET_WIDTH);
+        let blocked = existing_balls.iter().any(|(_, _, transform)| {
+            transform.translation.y >= 100.0 && position - transform.translation.x < 35.
+        });
+        if !blocked {
+            spawn_ball(
+                &mut commands,
+                current_ball_type,
+                None,
+                Transform::from_xyz(position, 190.0, 0.0),
+                &mut meshes,
+                &mut materials,
+            );
+            let new_ball = BallType::from_i32(dropper.rng.i32(1..=DROPPABLE_RANGE));
+            game.dropper.next_ball.ball_type = new_ball;
+            // Swap upcoming mesh
+            commands.get_entity(game.dropper.mesh).unwrap().despawn();
+            game.dropper.mesh = commands
+                .spawn(new_ball.mesh(true, None, &mut meshes, &mut materials))
+                .id()
         }
+    } else {
+        game_ev.send(RestartGameEvent {});
     }
 }
 
@@ -318,7 +385,7 @@ fn spawn_ball(
         .insert(Collider::ball(current_ball_type.size()))
         .insert(Restitution::coefficient(0.2))
         .insert(GravityScale(4.))
-        .insert(Velocity::linear(Vect::new(0.0, -100.0)))
+        .insert(Velocity::linear(Vect::new(0.0, -0.0)))
         .insert(ActiveEvents::COLLISION_EVENTS)
         .insert(TransformBundle::from(position));
 }
@@ -498,6 +565,7 @@ fn squash_balls(
     for (entity, _) in barriers.iter() {
         barrier_entities.insert(entity, true);
     }
+    let mut visited = HashSet::<Entity>::new();
     for contact in contacts {
         match (ball_types.get(contact.0), ball_types.get(contact.1)) {
             (
@@ -505,7 +573,7 @@ fn squash_balls(
                 Some((BallType::Simple(level_b), transform_b)),
             ) => {
                 // if level_a % COLOR_CYCLE_COUNT == level_b % COLOR_CYCLE_COUNT {
-                if level_a == level_b {
+                if level_a == level_b && visited.insert(*contact.0) && visited.insert(*contact.1) {
                     // let middle = transform_a.translation.lerp(transform_b.translation, 0.5);
                     commands.entity(*contact.0).despawn();
                     commands.entity(*contact.1).despawn();
