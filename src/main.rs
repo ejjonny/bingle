@@ -3,7 +3,7 @@ use bevy::{
     prelude::*,
     sprite::{MaterialMesh2dBundle, Mesh2dHandle},
     utils::{HashMap, HashSet},
-    window::{PresentMode, PrimaryWindow, WindowTheme},
+    window::{PrimaryWindow, WindowTheme},
 };
 use bevy_rapier2d::prelude::*;
 use bevy_turborand::prelude::*;
