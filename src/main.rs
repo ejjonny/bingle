@@ -10,7 +10,7 @@ use bevy_turborand::prelude::*;
 
 const UNIVERSAL_SCALE: f32 = 1.;
 const BUCKET_WIDTH: f32 = 300. * UNIVERSAL_SCALE;
-const BUCKET_HEIGHT: f32 = 180. * UNIVERSAL_SCALE;
+const BUCKET_HEIGHT: f32 = 150. * UNIVERSAL_SCALE;
 const BUCKET_Y_OFFSET: f32 = -100. * UNIVERSAL_SCALE;
 const UPCOMING_BALL_POSITION: Vec3 = Vec3::new(-BUCKET_WIDTH * 0.5 - BARRIER_PADDING * 0.5, 0., 0.);
 const BARRIER_PADDING: f32 = 100. * UNIVERSAL_SCALE;
@@ -50,7 +50,7 @@ fn main() {
                 ..default()
             }),
         )
-        .add_plugins(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
+        .add_plugins(RapierPhysicsPlugin::<()>::default().in_schedule(FixedUpdate))
         // .add_plugins(RapierDebugRenderPlugin::default())
         .add_plugins(RngPlugin::default())
         .add_systems(Startup, (setup_dropper, setup_graphics, setup_physics))
@@ -60,18 +60,21 @@ fn main() {
             Update,
             (
                 my_cursor_system,
-                mouse_click_system,
-                touch_events_system,
-                collision_system,
-                squash_balls,
-                grow_system,
-                check_game_state,
-                text_update_system,
-                update_score_system,
+                mouse_click_system
+                    .after(my_cursor_system),
+                touch_events_system
+                    .after(my_cursor_system),
+                collision_system
+                    .after(touch_events_system),
+                squash_balls
+                    .after(collision_system),
+                grow_system
+                    .after(squash_balls),
                 game_over_system,
-                restart_game_system,
+                restart_game_system
             ),
         )
+        .add_systems(PostUpdate, (check_game_state, update_score_system, text_update_system))
         .run();
 }
 
@@ -212,6 +215,9 @@ fn setup_physics(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
+    let mut config = RapierConfiguration::default();
+    config.timestep_mode = TimestepMode::Fixed { dt: 0.03, substeps: 2 };
+    commands.insert_resource(config);
     commands.insert_resource(Contacts(HashSet::<(Entity, Entity)>::new()));
     let mut walls = Vec::<(f32, f32, f32, f32)>::new();
     // Floor
@@ -404,6 +410,7 @@ fn spawn_ball(
     ball.insert(RigidBody::Dynamic)
         .insert(Collider::ball(current_ball_type.size()))
         .insert(Restitution::coefficient(0.2))
+        .insert(Friction::coefficient(0.))
         .insert(GravityScale(4.))
         .insert(Velocity::linear(Vect::new(0.0, -0.0)))
         .insert(ActiveEvents::COLLISION_EVENTS)
@@ -577,7 +584,7 @@ fn collision_system(
 fn squash_balls(
     mut game: ResMut<Game>,
     mut commands: Commands,
-    contacts: ResMut<Contacts>,
+    mut contacts: ResMut<Contacts>,
     balls: Query<(
         Entity,
         &BallType,
@@ -603,6 +610,7 @@ fn squash_balls(
     for (entity, _) in barriers.iter() {
         barrier_entities.insert(entity, true);
     }
+    let mut to_remove = HashSet::<(Entity, Entity)>::new();
     let mut visited = HashSet::<Entity>::new();
     for contact in contacts.0.iter() {
         match (ball_types.get(&contact.0), ball_types.get(&contact.1)) {
@@ -633,6 +641,7 @@ fn squash_balls(
                             } else {
                                 commands.entity(replaced).insert(BallProgress(0.));
                             }
+                            to_remove.insert(*contact);
                         }
                         game.score += (level_a + level_b) * 11;
                     }
@@ -650,10 +659,14 @@ fn squash_balls(
                     hit_barrier = true;
                 }
                 if hit_barrier {
+                    to_remove.insert(*contact);
                     game.strikes += 1;
                 }
             }
         }
+    }
+    for despawned in to_remove {
+        contacts.0.remove(&despawned);
     }
 }
 
@@ -679,6 +692,7 @@ fn restart_game_system(
     balls: Query<Entity, With<BallType>>,
     asset_server: Res<AssetServer>,
     mut game_ev: EventReader<RestartGameEvent>,
+    mut contacts: ResMut<Contacts>,
 ) {
     if !game_ev.is_empty() {
         game.score = 0;
@@ -690,6 +704,7 @@ fn restart_game_system(
         for entity in balls.iter() {
             commands.entity(entity).despawn();
         }
+        contacts.0.drain();
         commands
             .spawn((
                 NodeBundle {
@@ -725,6 +740,7 @@ fn restart_game_system(
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::FlexStart,
                         justify_content: JustifyContent::Center,
+                        top: Val::Px(10.),
                         ..default()
                     }),
                     ScoreText,
